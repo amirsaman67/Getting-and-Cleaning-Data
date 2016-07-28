@@ -1,79 +1,156 @@
-# Run the analysis -> creates the tiny data set and saves it under "tiny.txt"
+# ------------------------------------------------------
+#    Getting and Cleaning Data - Week Four Assignment
+# ------------------------------------------------------
+# Step 1: Set up environment for the project and load the necessary libraries
+setwd("./../git/Coursera/GetClearData/")
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(reshape2)
 
-# Reads the base sets (files with begining by X) in an optimal way
-# * filePath: path of the file
-# * filteredFeatures: ids of the features to be extracted
-# * features: all features names
-readBaseSet <- function(filePath, filteredFeatures, features) {
-        cols_widths <- rep(-16, length(features))
-        cols_widths[filteredFeatures] <- 16
-        rawSet <- read.fwf(
-                file=filePath,
-                widths=cols_widths,
-                col.names=features[filteredFeatures])
+# Step 2: Download and upzip files
+
+# Create a helper function to download the files
+# This function makes sure that:
+#  a) the data directory exists
+#  b) if the file already exists it isn't re-downloaded
+
+fileDownloader <- function (url, fname, directory = "./data") {
+    # check to see if the directory exists, if not, create it
+    if(!file.exists(directory)) {
+        message(paste("Creating directory:", directory))
+        dir.create(directory)
+    } else {
+        message(paste(directory, "directory already exists..."))
+    }
+    
+    #Create a full path to the file
+    fullFileName <- paste(directory, fname, sep = "/")
+    
+    # Determine the download method based on the file type
+    # 1. Extract the file type from the fname parameter
+    #    The str_match function returns an array based on the grep pattern used
+    #    Since I have used backreferences - by using brackets "()" - the value
+    #    that I need is in the second item "[, 2]". The full match, including the period,
+    #    is in the first item "[, 1]"
+    # 2. Compare the filename to known file types and set the download mode
+    FileType <- str_match(fname, pattern = "\\.(.+)$")[, 2]
+    BinaryFileTypes <- c("zip", "xlsx")
+    DownloadMode <- ifelse(FileType %in% BinaryFileTypes, "wb", "auto")
+    
+    # Check if the file exists. If not, download it using the correct
+    # download method
+    if(!file.exists(fullFileName)) {
+        message(paste("Downloading file", fname))
+        download.file(url, fullFileName, mode = DownloadMode)
+    } else {
+        message("File already downloaded...")
+    }
 }
 
-# Reads an additional file (other than the base sets). Used for subjects and labels.
-# * dataDirectory: directory of data
-# * filePath: relative path of the file. For instance if its value is "subject" it
-#   will read "UCI HAR Dataset/test/subject_test.txt" and
-# "UCI HAR Dataset/train/subject_train.txt", and merge them
-readAdditionalFile <- function(dataDirectory, filePath) {
-        filePathTest <- paste(dataDirectory, "/test/", filePath, "_test.txt", sep="")
-        filePathTrain <- paste(dataDirectory, "/train/", filePath, "_train.txt", sep="")
-        data <- c(read.table(filePathTest)[,"V1"], read.table(filePathTrain)[,"V1"])
-        data
+# --- Download the Zip File
+
+# Define the download URL.
+ZipFileURL <- "https://d396qusza40orc.cloudfront.net/getdata%2Fprojectfiles%2FUCI%20HAR%20Dataset.zip"
+
+# Grep out the filename - we'll use that again
+# This regex finds the string %2F and then starts capturing from that point. If if finds %2F in the string,
+# it restarts the capture from that point until the end of the line.
+# Also, replace the GET version of space (%20) in the filename with a space.
+ZipName <- str_match(ZipFileURL, "\\%2F((?:(?!\\%2F).)*)$")[, 2]
+ZipName <- str_replace_all(ZipName, "%20", " ")
+
+# Download the ZIP file and then unzip it
+fileDownloader(ZipFileURL, ZipName)
+unzip(paste("./data", ZipName, sep = "/"), exdir = "./data")
+
+# The output directory doesn't have a .zip extension. Strip of the extension so we can use that name.
+dataDir <- str_replace(ZipName, ".zip", "")
+
+# Define the directories where the data is located.
+baseDataDir  <- file.path("./data", dataDir)
+testDataDir  <- file.path(baseDataDir, "test")
+trainDataDir <- file.path(baseDataDir, "train")
+
+# Create a generic function to read in files
+readInData <- function(fnFileName, ...) {
+    read.table(fnFileName, header = FALSE, ...)
 }
 
-# Correct a feature name - makes it nicer for dataframe columns (removes parentheses)
-# because otherwise they are transformed to dots.
-# * featureName: name of the feature
-correctFeatureName <- function(featureName) {
-        featureName <- gsub("\\(", "", featureName)
-        featureName <- gsub("\\)", "", featureName)
-        featureName
-}
+# Load activity labels + features
+# Also, convert the text field to character (not factor) and assign heading values
+activityLabels <- readInData(file.path(baseDataDir,  "activity_labels.txt"), 
+                             colClasses = c("numeric", "character"), 
+                             col.names = c("id", "activity"))
+featureLabels <- readInData(file.path(baseDataDir,  "features.txt"), 
+                            colClasses = c("numeric", "character"), 
+                            col.names = c("id", "feature"))
 
-# Read sets and returns a complete sets
-# * dataDirectory: directory of data
-readSets <- function(dataDirectory) {
-        # Adding main data files (X_train and X_test)
-        featuresFilePath <- paste(dataDirectory, "/features.txt", sep="")
-        features <- read.table(featuresFilePath)[,"V2"]
-        filteredFeatures <- sort(union(grep("mean\\(\\)", features), grep("std\\(\\)", features)))
-        features <- correctFeatureName(features)
-        set <- readBaseSet(paste(dataDirectory, "/test/X_test.txt", sep=""), filteredFeatures, features)
-        set <- rbind(set, readBaseSet(paste(dataDirectory, "/train/X_train.txt", sep=""), filteredFeatures, features))
-        
-        # Adding subjects
-        set$subject <- readAdditionalFile("UCI HAR Dataset", "subject")
-        
-        # Adding activities
-        activitiesFilePath <- paste(dataDirectory, "/activity_labels.txt", sep="")
-        activities <- read.table(activitiesFilePath)[,"V2"]
-        set$activity <- activities[readAdditionalFile("UCI HAR Dataset", "y")]
-        
-        set
-}
+# Work out which of the features we need (mean and std.dev columns)
+# Grep selects either mean or std followed by ().
+# First, return a vector of indexes showing those labels that contain mean() or std()
+# Then, make the names CamelCase and remove the brackets and hyphens.
+featureLabels.meanstd <- grep("(?:mean|std)\\(", featureLabels$feature)
 
-# From sets, creates the tidy dataset (a summary)
-# * dataDirectory: directory of data
-createSummaryDataset <- function(dataDirectory) {
-        sets <- readSets(dataDirectory)
-        sets_x <- sets[,seq(1, length(names(sets)) - 2)]
-        summary_by <- by(sets_x,paste(sets$subject, sets$activity, sep="_"), FUN=colMeans)
-        summary <- do.call(rbind, summary_by)
-        summary
-}
+# Extract the names and store in the file
+featureLabels.names <- featureLabels[featureLabels.meanstd, 2]
 
-dataDirectory <- "UCI HAR Dataset"
-if (!file.exists(dataDirectory)) {
-        url <- "https://d396qusza40orc.cloudfront.net/getdata%2Fprojectfiles%2FUCI%20HAR%20Dataset.zip "
-        tmp_file <- "./temp.zip"
-        download.file(url,tmp_file, method="curl")
-        unzip(tmp_file, exdir="./")
-        unlink(tmp_file)
-}
+# 1. Define a vector of regexes and substitutions
+#    Replace -mean and -std with Mean and Std respectively then remove the hyphens and brackets
+#    Then remove the abbreviations and make the names descriptive
+RegexSubs <- c("\\-mean"   = "Mean",
+               "\\-std"    = "StdDev",
+               "[-()]"     = "",
+               "^f"        = "frequency",
+               "^t"        = "time",
+               "Acc"       = "Accelerometer",
+               "BodyBody"  = "Body",
+               "Gyro"      = "Gyroscope",
+               "Mag"       = "Magnitude")
 
-summary <- createSummaryDataset(dataDirectory)
-write.table(summary, "tidy.txt")
+# 3. Apply these regexes to the featureLabels.names vector
+featureLabels.names <- str_replace_all(featureLabels.names, RegexSubs)
+
+# Read in the test data files
+testDataSubjects    <- readInData(file.path(testDataDir, "subject_test.txt"), col.names = "subject")
+testDataActivities  <- readInData(file.path(testDataDir, "y_test.txt"), col.names = "activity")
+testDataRecords     <- readInData(file.path(testDataDir, "X_test.txt"))[, featureLabels.meanstd]
+colnames(testDataRecords) <- featureLabels.names
+
+# Combine all test files into a single dataset
+test.data <- cbind(testDataSubjects, testDataActivities, testDataRecords)
+
+# Read in the train data files
+trainDataSubjects   <- readInData(file.path(trainDataDir, "subject_train.txt"), col.names = "subject")
+trainDataActivities <- readInData(file.path(trainDataDir, "y_train.txt"), col.names = "activity")
+trainDataRecords    <- readInData(file.path(trainDataDir, "X_train.txt"))[, featureLabels.meanstd]
+colnames(trainDataRecords) <- featureLabels.names
+
+# Combine all train files into a single dataset
+train.data <- cbind(trainDataSubjects, trainDataActivities, trainDataRecords)
+
+#Combine the train and test data together to make a full dataset.
+combined.data <- rbind(test.data, train.data)
+
+# Convert activities and subjects into factors
+# With subjects we only have their ID
+# With Activities we have their ID and their description
+
+combined.data$subject <- as.factor(combined.data$subject)
+combined.data$activity <- factor(combined.data$activity, 
+                                 levels = activityLabels$id, 
+                                 labels = activityLabels$activity)
+
+# Use this dataset to create the second dataset
+# First, convert the dataset to long format 
+melted.data <- melt(combined.data, id = c("subject", "activity"))
+
+# Calculate the means of each variable for each subject/activity combination
+mean.data <- dcast(melted.data, subject + activity ~ variable, mean)
+
+# Finally, write the mean.data file out to disc.
+write.table(mean.data, "TidyData.txt", sep = ",", row.names = FALSE)
+
+#----------------------------------------------
+#               End of File
+#==============================================
